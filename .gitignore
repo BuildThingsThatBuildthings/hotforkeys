@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode/Swift build
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Build products
+HotForKeys.app/
+*.app/
+build/
+
+# SPM
+.swiftpm/
+Package.resolved
