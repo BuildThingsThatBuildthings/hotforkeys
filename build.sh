@@ -3,16 +3,17 @@
 # Build script for HotForKeys
 # Creates a proper macOS app bundle from the Swift package
 
-set -e
+set -euo pipefail
+cd "$(dirname "$0")"
 
 APP_NAME="HotForKeys"
-BUILD_DIR=".build/release"
 APP_BUNDLE="$APP_NAME.app"
 
 echo "Building $APP_NAME..."
 
 # Build the executable
-swift build -c release
+swift build -c release "$@"
+BUILD_DIR="$(swift build -c release --show-bin-path "$@")"
 
 echo "Creating app bundle..."
 

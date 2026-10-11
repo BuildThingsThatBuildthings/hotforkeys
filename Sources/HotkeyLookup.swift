@@ -5,6 +5,17 @@ struct Shortcut {
     let modifiers: NSEvent.ModifierFlags
     let actionName: String?
 
+    // AXAttributeConstants.h: Command is implied unless the no-command bit is set.
+    static func modifiers(fromAXMask mask: Int?) -> NSEvent.ModifierFlags {
+        let mask = mask ?? 0
+        var flags: NSEvent.ModifierFlags = []
+        if mask & (1 << 0) != 0 { flags.insert(.shift) }
+        if mask & (1 << 1) != 0 { flags.insert(.option) }
+        if mask & (1 << 2) != 0 { flags.insert(.control) }
+        if mask & (1 << 3) == 0 { flags.insert(.command) }
+        return flags
+    }
+
     var displayString: String {
         var parts: [String] = []
 
@@ -129,8 +140,6 @@ struct HotkeyDatabase {
         "Open Enclosing Folder": ("↑", .command),
         "Go to Folder": ("G", [.command, .shift]),
         "Go to Parent": ("↑", .command),
-        "Next Tab": ("}", [.command, .shift]),
-        "Previous Tab": ("{", [.command, .shift]),
         "Next Tab": ("]", [.command, .shift]),
         "Previous Tab": ("[", [.command, .shift]),
         "Select Next Tab": ("→", [.command, .option]),
@@ -163,7 +172,6 @@ struct HotkeyDatabase {
         "Empty Trash": ("⌫", [.command, .shift]),
         "Spotlight": ("Space", .command),
         "Quick Look": ("Y", .command),
-        "Quick Look": ("Space", []),
         "Show Original": ("R", .command),
         "Make Alias": ("L", .command),
         "Add to Favorites": ("T", [.command, .control]),

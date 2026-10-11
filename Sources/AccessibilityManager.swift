@@ -3,22 +3,40 @@ import ApplicationServices
 
 class AccessibilityManager {
     typealias ShortcutCallback = (Shortcut) -> Void
+    typealias ModifierCallback = (NSEvent.ModifierFlags, Bool) -> Void  // (modifiers, isPressed)
 
-    private let callback: ShortcutCallback
+    private let shortcutCallback: ShortcutCallback
+    private var modifierCallback: ModifierCallback?
     private var observer: AXObserver?
     private var currentApp: NSRunningApplication?
     private var appObservation: NSKeyValueObservation?
 
-    init(callback: @escaping ShortcutCallback) {
-        self.callback = callback
+    // Modifier key monitoring
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var currentModifiers: NSEvent.ModifierFlags = []
+    private var modifierTimer: Timer?
+    private let modifierDelay: TimeInterval = 0.3  // Delay before showing overlay
+
+    init(shortcutCallback: @escaping ShortcutCallback, modifierCallback: ModifierCallback? = nil) {
+        self.shortcutCallback = shortcutCallback
+        self.modifierCallback = modifierCallback
     }
 
     func checkPermissions() -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        let trusted = AXIsProcessTrusted()
+        NSLog("[HotForKeys] Accessibility trusted: \(trusted)")
+        return trusted
+    }
+
+    func requestPermissions() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let result = AXIsProcessTrustedWithOptions(options)
+        NSLog("[HotForKeys] Permission request result: \(result)")
     }
 
     func startMonitoring() {
+        guard appObservation == nil else { return }
         // Watch for frontmost app changes
         appObservation = NSWorkspace.shared.observe(\.frontmostApplication, options: [.new]) { [weak self] _, change in
             if let app = change.newValue {
@@ -30,20 +48,101 @@ class AccessibilityManager {
         if let app = NSWorkspace.shared.frontmostApplication {
             switchToApp(app)
         }
+
+        // Start modifier key monitoring
+        startModifierMonitoring()
     }
 
     func stopMonitoring() {
         appObservation?.invalidate()
         appObservation = nil
         removeObserver()
+        stopModifierMonitoring()
+        currentApp = nil
+    }
+
+    // MARK: - Modifier Key Monitoring
+
+    private func startModifierMonitoring() {
+        NSLog("[HotForKeys] Starting modifier monitoring...")
+
+        // Global monitor for when app is not focused
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            NSLog("[HotForKeys] Global modifier event: \(event.modifierFlags.rawValue)")
+            self?.handleModifierChange(event)
+        }
+
+        // Local monitor for when app is focused
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            NSLog("[HotForKeys] Local modifier event: \(event.modifierFlags.rawValue)")
+            self?.handleModifierChange(event)
+            return event
+        }
+
+        NSLog("[HotForKeys] Global monitor: \(globalMonitor != nil ? "created" : "FAILED")")
+        NSLog("[HotForKeys] Local monitor: \(localMonitor != nil ? "created" : "FAILED")")
+    }
+
+    private func stopModifierMonitoring() {
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
+        }
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMonitor = nil
+        }
+        resetModifierState()
+    }
+
+    private func resetModifierState() {
+        modifierTimer?.invalidate()
+        modifierTimer = nil
+        let hadModifiers = !currentModifiers.isEmpty
+        currentModifiers = []
+        if hadModifiers { modifierCallback?([], false) }
+    }
+
+    private func handleModifierChange(_ event: NSEvent) {
+        handleModifierChange(event.modifierFlags)
+    }
+
+    // Accept flags directly so lifecycle tests do not install event monitors.
+    func handleModifierChange(_ flags: NSEvent.ModifierFlags) {
+        let newModifiers = flags.intersection([.command, .option, .control, .shift])
+        let previousModifiers = currentModifiers
+        // Left/right modifier and Caps Lock events can leave the chord unchanged.
+        guard newModifiers != previousModifiers else { return }
+        currentModifiers = newModifiers
+        modifierTimer?.invalidate()
+        modifierTimer = nil
+
+        guard !newModifiers.isEmpty else {
+            modifierCallback?([], false)
+            return
+        }
+
+        let delay = previousModifiers.isEmpty ? modifierDelay : 0.1
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self, self.currentModifiers == newModifiers else { return }
+            self.modifierTimer = nil
+            // The timer runs on main. Avoid queuing a stale show after release.
+            self.modifierCallback?(newModifiers, true)
+        }
+        modifierTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func getCurrentApp() -> NSRunningApplication? {
+        return NSWorkspace.shared.frontmostApplication ?? currentApp
     }
 
     private func switchToApp(_ app: NSRunningApplication?) {
-        guard let app = app, app != currentApp else { return }
-
+        guard app != currentApp else { return }
+        resetModifierState()
         removeObserver()
         currentApp = app
-        createObserver(for: app)
+        if let app = app { createObserver(for: app) }
     }
 
     private func createObserver(for app: NSRunningApplication) {
@@ -94,7 +193,7 @@ class AccessibilityManager {
     private func handleMenuItemSelected(_ element: AXUIElement) {
         if let shortcut = extractShortcut(from: element) {
             DispatchQueue.main.async { [weak self] in
-                self?.callback(shortcut)
+                self?.shortcutCallback(shortcut)
             }
         }
     }
@@ -110,7 +209,7 @@ class AccessibilityManager {
         if role == kAXButtonRole as String || role == "AXToolbarButton" {
             if let shortcut = extractShortcut(from: element) {
                 DispatchQueue.main.async { [weak self] in
-                    self?.callback(shortcut)
+                    self?.shortcutCallback(shortcut)
                 }
             }
         }
@@ -125,7 +224,7 @@ class AccessibilityManager {
 
         if let shortcut = extractShortcut(from: selected) {
             DispatchQueue.main.async { [weak self] in
-                self?.callback(shortcut)
+                self?.shortcutCallback(shortcut)
             }
         }
     }
@@ -146,20 +245,7 @@ class AccessibilityManager {
 
         // If we have a command character, build the shortcut
         if cmdCharResult == .success, let cmdChar = cmdCharValue as? String, !cmdChar.isEmpty {
-            var modifiers: NSEvent.ModifierFlags = []
-
-            if modifiersResult == .success, let modifierInt = modifiersValue as? Int {
-                // Map AX modifier flags to NSEvent.ModifierFlags
-                // AX uses: 0 = Cmd, 1 = Cmd+Shift, 2 = Cmd+Option, 4 = Cmd+Control
-                if modifierInt & (1 << 0) != 0 { modifiers.insert(.shift) }
-                if modifierInt & (1 << 1) != 0 { modifiers.insert(.option) }
-                if modifierInt & (1 << 2) != 0 { modifiers.insert(.control) }
-                // Command is always present for menu shortcuts
-                modifiers.insert(.command)
-            } else {
-                // Default: just command
-                modifiers = .command
-            }
+            let modifiers = Shortcut.modifiers(fromAXMask: modifiersResult == .success ? modifiersValue as? Int : nil)
 
             return Shortcut(key: cmdChar, modifiers: modifiers, actionName: title)
         }
@@ -171,12 +257,7 @@ class AccessibilityManager {
         if virtualKeyResult == .success, let virtualKey = virtualKeyValue as? Int {
             let keyString = virtualKeyToString(virtualKey)
 
-            var modifiers: NSEvent.ModifierFlags = [.command]
-            if modifiersResult == .success, let modifierInt = modifiersValue as? Int {
-                if modifierInt & (1 << 0) != 0 { modifiers.insert(.shift) }
-                if modifierInt & (1 << 1) != 0 { modifiers.insert(.option) }
-                if modifierInt & (1 << 2) != 0 { modifiers.insert(.control) }
-            }
+            let modifiers = Shortcut.modifiers(fromAXMask: modifiersResult == .success ? modifiersValue as? Int : nil)
 
             return Shortcut(key: keyString, modifiers: modifiers, actionName: title)
         }

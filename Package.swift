@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "HotForKeys",
             path: "Sources"
+        ),
+        .testTarget(
+            name: "HotForKeysTests",
+            dependencies: ["HotForKeys"],
+            path: "Tests"
         )
     ]
 )
