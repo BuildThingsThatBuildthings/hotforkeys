@@ -13,8 +13,12 @@ DerivedData/
 # Build products
 HotForKeys.app/
 *.app/
+HotForKeys-local.zip
 build/
 
 # SPM
 .swiftpm/
 Package.resolved
+
+# Python packaging helper
+__pycache__/
